@@ -161,6 +161,67 @@ final class Controller: NSObject, NSApplicationDelegate, WKScriptMessageHandlerW
     }
 }
 
+func headlessSelfTest(profilePath: String, probeOverride: String?) -> Never {
+    do {
+        let client = PinnedClient(profile: try ConnectionProfile(path: profilePath))
+        let group = DispatchSemaphore(value: 0)
+        var code: Int32 = 1
+        func finish(_ value: [String: Any], success: Bool) {
+            if let bytes = try? encodedJSON(value) { print(String(decoding: bytes, as: UTF8.self)) }
+            else { fputs("Cannot encode self-test result\n", stderr) }
+            code = success ? 0 : 1; group.signal()
+        }
+        func failure(_ error: Error) { fputs("\(error)\n", stderr); group.signal() }
+        client.check { checkResult in
+            switch checkResult {
+            case .failure(let error): failure(error)
+            case .success(let check):
+                client.call("GET", "/v1/status") { statusResult in
+                    switch statusResult {
+                    case .failure(let error): failure(error)
+                    case .success(let status):
+                        guard let path = probeOverride ?? (status["suggestedProbePath"] as? String) else {
+                            failure(ConnectionFailure.message("The mini did not provide a harmless probe path")); return
+                        }
+                        client.call("POST", "/v1/requests", body: ["operation": "probe", "path": path]) { requestResult in
+                            switch requestResult {
+                            case .failure(let error): failure(error)
+                            case .success(let request):
+                                guard let id = request["id"] as? String, let fingerprint = request["fingerprint"] as? String else {
+                                    failure(ConnectionFailure.message("The mini returned an invalid probe request")); return
+                                }
+                                client.call("POST", "/v1/requests/\(id)/approve", body: ["fingerprint": fingerprint]) { approvalResult in
+                                    switch approvalResult {
+                                    case .failure(let error): failure(error)
+                                    case .success(let approval):
+                                        let operation = approval["result"] as? [String: Any] ?? [:]
+                                        let errno = (operation["errno"] as? NSNumber)?.intValue ?? -1
+                                        let success = approval["state"] as? String == "succeeded" && errno == 0
+                                        finish(["connected": true, "check": check, "request": approval,
+                                                "operation": "open-readonly-no-content", "errno": errno,
+                                                "result": success ? "succeeded" : "failed"], success: success)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard group.wait(timeout: .now() + 35) == .success else {
+            fputs("Native self-test timed out\n", stderr); client.close(); exit(1)
+        }
+        client.close(); exit(code)
+    } catch {
+        fputs("\(error)\n", stderr); exit(1)
+    }
+}
+
+if args.contains("--self-test") {
+    guard let profilePath = option("--profile") else { fputs("--profile is required\n", stderr); exit(1) }
+    headlessSelfTest(profilePath: profilePath, probeOverride: option("--self-test-path"))
+}
+
 func headlessApprove(profilePath: String, requestID: String) -> Never {
     guard let uuid = UUID(uuidString: requestID) else {
         fputs("The test request ID is not a UUID\n", stderr); exit(1)

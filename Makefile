@@ -1,4 +1,4 @@
-.PHONY: build test start controller connection-build connection-test macbook-package macbook-tailscale-test
+.PHONY: build test start controller connection-build connection-test macbook-package macbook-self-test
 build:
 	bash scripts/build.sh
 test: build
@@ -13,5 +13,5 @@ connection-test:
 	/usr/bin/python3 -m unittest discover -s Tests -p 'test_native_connection.py' -v
 macbook-package: connection-build
 	bash scripts/package-controller.sh
-macbook-tailscale-test:
-	bash scripts/macbook-tailscale-test.sh
+macbook-self-test:
+	bash scripts/macbook-self-test.sh "$(PROFILE)"
