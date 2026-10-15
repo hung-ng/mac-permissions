@@ -7,6 +7,8 @@ TAILSCALE=${TAILSCALE_BIN:-/usr/local/bin/tailscale}
 MACBOOK_HOST=${MACBOOK_HOST:-hung-macbook-pro}
 MACBOOK_USER=${MACBOOK_USER:-$(id -un)}
 SSH_TARGET="${MACBOOK_USER}@${MACBOOK_HOST}"
+MACBOOK_SSH_MODE=${MACBOOK_SSH_MODE:-openssh}
+MACBOOK_SSH_KNOWN_HOSTS=${MACBOOK_SSH_KNOWN_HOSTS:-"$HOME/.ssh/known_hosts"}
 ARCHIVE=${MACBOOK_ARCHIVE:-"$ROOT/build/releases/Mac-Permissions-MacBook.zip"}
 PROFILE=${MACBOOK_PROFILE:-"$ROOT/build/private-connection/Mini Connection.macpermissions"}
 STATE=${HELPER_STATE_DIR:-"$ROOT/build/runtime"}
@@ -32,7 +34,16 @@ quote() {
 }
 
 remote() {
-    /usr/bin/perl -e '$seconds=shift @ARGV; $SIG{ALRM}=sub{exit 124}; alarm $seconds; exec @ARGV' "$REMOTE_TIMEOUT" "$TAILSCALE" ssh "$SSH_TARGET" "$@"
+    if [[ "$MACBOOK_SSH_MODE" == "tailscale" ]]; then
+        /usr/bin/perl -e '$seconds=shift @ARGV; $SIG{ALRM}=sub{exit 124}; alarm $seconds; exec @ARGV' "$REMOTE_TIMEOUT" "$TAILSCALE" ssh "$SSH_TARGET" "$@"
+    elif [[ "$MACBOOK_SSH_MODE" == "openssh" ]]; then
+        /usr/bin/perl -e '$seconds=shift @ARGV; $SIG{ALRM}=sub{exit 124}; alarm $seconds; exec @ARGV' "$REMOTE_TIMEOUT" /usr/bin/ssh \
+            -o ConnectTimeout="$REMOTE_TIMEOUT" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$MACBOOK_SSH_KNOWN_HOSTS" "$SSH_TARGET" "$@"
+    else
+        echo "MACBOOK_SSH_MODE must be openssh or tailscale" >&2
+        return 2
+    fi
 }
 
 remote_sh() {
@@ -49,19 +60,29 @@ echo "Checking Tailscale reachability to $MACBOOK_HOST..."
 "$TAILSCALE" ping --c 1 --timeout 5s "$MACBOOK_HOST" >/dev/null
 if ! remote /usr/bin/true >/dev/null 2>&1; then
     cat >&2 <<EOF
-The MacBook is reachable but Tailscale SSH is not available.
-On the MacBook, perform this one-time setup in Terminal:
+The MacBook is reachable over Tailscale, but its automation channel is not ready.
+The default channel is standard macOS Remote Login carried over Tailscale. On the MacBook,
+enable System Settings → General → Sharing → Remote Login for $MACBOOK_USER.
 
-    tailscale set --ssh=true
+Then, once from the mini, accept the MacBook host key and verify key-based access:
 
-Then run this script again. The tailnet policy must allow $MACBOOK_USER to SSH to $MACBOOK_HOST.
+    ssh -o StrictHostKeyChecking=accept-new $SSH_TARGET /usr/bin/true
+
+If that first command asks for a password because the mini's public key is not installed,
+add ~/.ssh/id_ed25519.pub to the MacBook account's ~/.ssh/authorized_keys, then run it again.
+The unattended harness deliberately uses BatchMode and never stores or prompts for a password.
+
+Then run this script again. The native controller's actual application connection remains
+TLS 1.3 over Tailscale; SSH is used only to stage and run the disposable MacBook test.
+Set MACBOOK_SSH_MODE=tailscale only if the MacBook uses a non-sandboxed Tailscale build
+that provides its own SSH server.
 EOF
     exit 3
 fi
 REMOTE_READY=1
 
 remote_sh "$(quote /bin/mkdir) -m 700 -p $(quote "$REMOTE_ROOT")"
-echo "Transferring the signed controller and private profile over Tailscale SSH..."
+echo "Transferring the signed controller and private profile over SSH carried by Tailscale..."
 /usr/bin/base64 < "$ARCHIVE" | remote_sh "$(quote /usr/bin/base64) -D -o $(quote "$REMOTE_ARCHIVE")"
 /usr/bin/base64 < "$PROFILE" | remote_sh "$(quote /usr/bin/base64) -D -o $(quote "$REMOTE_PROFILE")"
 remote_sh "$(quote /bin/chmod) 600 $(quote "$REMOTE_PROFILE")"
@@ -114,7 +135,7 @@ import json, pathlib, sys, time, os
 root, host, request_id, check, approval, final = sys.argv[1:]
 evidence = {
     "testedAt": time.time(),
-    "transport": "Tailscale SSH to native TLS controller",
+    "transport": "OpenSSH carried by Tailscale to native TLS controller",
     "macbook": host,
     "requestID": request_id,
     "check": json.loads(check),
