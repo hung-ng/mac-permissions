@@ -166,17 +166,26 @@ class NativeConnection(unittest.TestCase):
         actual=self.owner.call("GET","/v1/requests/"+request["id"])
         self.assertEqual("succeeded",actual["state"]);self.assertEqual(0,actual["result"]["errno"])
 
-    def test_10_transport_does_not_proxy_arbitrary_urls(self):
+    def test_10_headless_native_approval_performs_the_real_operation(self):
+        request=self.owner.call("POST","/v1/requests",dict(operation="probe",path=self.temp.name))
+        result=subprocess.run([self.controller,"--profile",str(self.profile),"--approve-test-request",request["id"]],capture_output=True,text=True,timeout=15)
+        self.assertEqual(0,result.returncode,result.stderr+result.stdout)
+        value=json.loads(result.stdout)
+        self.assertEqual("succeeded",value["state"]);self.assertEqual(0,value["result"]["errno"])
+        actual=self.owner.call("GET","/v1/requests/"+request["id"])
+        self.assertEqual("succeeded",actual["state"]);self.assertEqual(0,actual["result"]["errno"])
+
+    def test_11_transport_does_not_proxy_arbitrary_urls(self):
         for target in ("https://attacker.invalid/", "//attacker.invalid/", "/outside-helper"):
             self.assertEqual(404,self.request("GET",target)[0])
 
-    def test_11_world_readable_profile_is_rejected_by_cli(self):
+    def test_12_world_readable_profile_is_rejected_by_cli(self):
         path=self.changed_profile();path.chmod(0o644)
         result=self.check(path)
         self.assertNotEqual(0,result.returncode)
         self.assertIn("mode 0600",result.stderr)
 
-    def test_12_bridge_restart_recovers_without_new_trust_or_auto_approval(self):
+    def test_13_bridge_restart_recovers_without_new_trust_or_auto_approval(self):
         request=self.owner.call("POST","/v1/requests",dict(operation="probe",path=self.temp.name))
         type(self).bridge.terminate();type(self).bridge.wait(5)
         result=self.check();self.assertNotEqual(0,result.returncode)
@@ -187,7 +196,7 @@ class NativeConnection(unittest.TestCase):
         result=wait_for(connected);self.assertTrue(json.loads(result.stdout)["connected"])
         self.assertEqual("pending",self.owner.call("GET","/v1/requests/"+request["id"])["state"])
 
-    def test_13_helper_restart_reports_unavailable_and_recovers_with_same_profile(self):
+    def test_14_helper_restart_reports_unavailable_and_recovers_with_same_profile(self):
         type(self).helper.terminate();type(self).helper.wait(6)
         result=self.check();self.assertNotEqual(0,result.returncode)
         self.assertIn("mini helper is unavailable",result.stderr)

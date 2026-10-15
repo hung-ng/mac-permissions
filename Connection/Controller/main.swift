@@ -161,6 +161,57 @@ final class Controller: NSObject, NSApplicationDelegate, WKScriptMessageHandlerW
     }
 }
 
+func headlessApprove(profilePath: String, requestID: String) -> Never {
+    guard let uuid = UUID(uuidString: requestID) else {
+        fputs("The test request ID is not a UUID\n", stderr); exit(1)
+    }
+    do {
+        let client = PinnedClient(profile: try ConnectionProfile(path: profilePath))
+        let group = DispatchSemaphore(value: 0)
+        var code: Int32 = 1
+        func finish(_ result: Result<[String: Any], Error>) {
+            switch result {
+            case .failure(let error): fputs("\(error)\n", stderr)
+            case .success(let value):
+                guard let bytes = try? encodedJSON(value) else { fputs("Cannot encode approval result\n", stderr); break }
+                print(String(decoding: bytes, as: UTF8.self)); code = 0
+            }
+            group.signal()
+        }
+        client.check { checkResult in
+            switch checkResult {
+            case .failure(let error): finish(.failure(error))
+            case .success:
+                client.call("GET", "/v1/requests") { result in
+                    switch result {
+                    case .failure(let error): finish(.failure(error))
+                    case .success(let value):
+                        guard let requests = value["requests"] as? [[String: Any]],
+                              let request = requests.first(where: { ($0["id"] as? String) == uuid.uuidString.lowercased() }),
+                              request["state"] as? String == "pending",
+                              let spec = request["spec"] as? [String: Any], spec["operation"] as? String == "probe",
+                              let fingerprint = request["fingerprint"] as? String else {
+                            finish(.failure(ConnectionFailure.message("Only a pending harmless probe can be approved by this test command"))); return
+                        }
+                        client.call("POST", "/v1/requests/\(uuid.uuidString.lowercased())/approve", body: ["fingerprint": fingerprint], completion: finish)
+                    }
+                }
+            }
+        }
+        guard group.wait(timeout: .now() + 25) == .success else {
+            fputs("Native approval timed out\n", stderr); client.close(); exit(1)
+        }
+        client.close(); exit(code)
+    } catch {
+        fputs("\(error)\n", stderr); exit(1)
+    }
+}
+
+if !args.contains("--smoke"), let requestID = option("--approve-test-request") {
+    guard let profilePath = option("--profile") else { fputs("--profile is required\n", stderr); exit(1) }
+    headlessApprove(profilePath: profilePath, requestID: requestID)
+}
+
 if args.contains("--check") {
     do {
         guard let path = option("--profile") else { try connectionFail("--profile is required") }
